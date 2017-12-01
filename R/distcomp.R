@@ -68,13 +68,17 @@ NULL
 #' @importFrom httr add_headers
 #' @importFrom jsonlite fromJSON
 #' @importFrom jsonlite toJSON
+#' @importFrom RProtoBuf serialize_pb
+#' @importFrom RProtoBuf unserialize_pb
 #'
 #' @examples
 #' distcomp:::.makeOpencpuURL("foo", "http://localhost:9999/ocpu")
 #'
 #' @keywords internal
-.makeOpencpuURL <- function(fn, urlPrefix, package="distcomp") {
-  paste(urlPrefix, "library", package, "R", fn, "json", sep="/")
+################ LONG: Add serialize_type to .makeOpencpuURL #######################
+.makeOpencpuURL <- function(fn, urlPrefix, package="distcomp", serialize_type=c("json", "pb")) {
+  sType <- match.arg(serialize_type)
+  paste(urlPrefix, "library", package, "R", fn, sType, sep="/")
 }
 
 #' Check that a definition object meets minimal requirements
@@ -93,7 +97,7 @@ NULL
 #'
 #' @keywords internal
 .defnOK <- function(defn) {
-    ! is.null(defn$id) && nchar(defn$id) > 0
+  ! is.null(defn$id) && nchar(defn$id) > 0
 }
 
 #' Setup a workspace and configuration for a distributed computation
@@ -127,6 +131,9 @@ NULL
 #' distcompSetup(workspacePath="./workspace")
 #' }
 #' @export
+################ LONG: load RProtoBuf ###################################
+library(RProtoBuf)
+################ Long: add serialize_type to distcompSetup ####################################
 distcompSetup <- function(workspacePath = "",
                           defnPath = paste(workspacePath, "defn", sep=.Platform$file.sep),
                           instancePath = paste(workspacePath, "instances", sep=.Platform$file.sep),
@@ -134,8 +141,9 @@ distcompSetup <- function(workspacePath = "",
                           dataFileName = "data.rds",
                           instanceFileName = "instance.rds",
                           ssl_verifyhost = 1L,
-                          ssl_verifypeer = 1L) {
+                          ssl_verifypeer = 1L, serialize_type = c("json", "pb")) {
   ## TODO: In the next version, this should be stuffed in an R6 class
+  sType <- match.arg(serialize_type)
   testFileName <- paste(sample(letters, 15), collapse="")
   if (!file.exists(defnPath)) {
     defnOk <- dir.create(defnPath)
@@ -151,7 +159,7 @@ distcompSetup <- function(workspacePath = "",
     }
     file.remove(testFile)
   }
-
+  
   if (!file.exists(instancePath)) {
     defnOk <- dir.create(instancePath)
     if (!defnOk) {
@@ -166,16 +174,18 @@ distcompSetup <- function(workspacePath = "",
     }
     file.remove(testFile)
   }
-
+  
   distcompEnv <- getOption("distcompEnv")
+  ############# LONG: Add serialize_type to distcompEnv[["config]] ################
   distcompEnv[["config"]] <- list(workspacePath = workspacePath,
                                   defnPath = defnPath,
                                   instancePath = instancePath,
                                   defnFileName = defnFileName,
                                   dataFileName = dataFileName,
                                   instanceFileName = instanceFileName,
+                                  serialize_type = sType,
                                   sslConfig = config(ssl_verifyhost = ssl_verifyhost,
-                                    ssl_verifypeer = ssl_verifypeer))
+                                                     ssl_verifypeer = ssl_verifypeer))
   distcompEnv[["computationInfo"]] <- list()
   TRUE
 }
@@ -407,16 +417,22 @@ executeMethod <- function(objectId, method, ...) {
 #' @importFrom httr add_headers
 #' @importFrom jsonlite fromJSON
 #' @importFrom jsonlite toJSON
+#' @importFrom RProtoBuf serialize_pb
+#' @importFrom RProtoBuf unserialize_pb
 #' @param q the result of a httr response
 #' @return the converted result, if JSON, or the raw content
 #'
 #' @keywords internal
 ## Deserialize URL result, only handle JSON at the moment
+
+############### LONG: Add an option to handle protobuf #####################
 .deSerialize <- function(q) {
   cType <- headers(q)['content-type']
-  if (cType == "application/json")
+  if (cType == "application/json") {
     fromJSON(rawToChar(q$content))
-  else
+  } else if (cType == "application/x-protobuf" || cType == "application/rprotobuf") {
+    unserialize_pb(q$content)
+  } else
     q$content
 }
 
@@ -447,9 +463,9 @@ createInstanceObject <- function (defnId, instanceId, dataFileName=NULL) {
   data <- readRDS(paste(config$defnPath, defnId,
                         if (is.null(dataFileName)) config$dataFileName else dataFileName,
                         sep=.Platform$file.sep))
-
+  
   object <- makeWorker(defn, data)
-
+  
   ## Check if the instance folder exists
   thisInstancePath <- paste(config$instancePath, instanceId, sep=.Platform$file.sep)
   dir.create(thisInstancePath)
@@ -524,24 +540,39 @@ saveNewComputation <- function(defn, data, dataFileName=NULL) {
 #' @importFrom httr add_headers
 #' @importFrom jsonlite fromJSON
 #' @importFrom jsonlite toJSON
+#' @importFrom RProtoBuf serialize_pb
+#' @importFrom RProtoBuf unserialize_pb
 #'
 #' @return TRUE if everything goes well
 #' @export
+
+############ LONG: Add protobuf option to uploadNewComputation ################
 uploadNewComputation <- function(site, defn, data) {
   if (! .defnOK(defn)) {
-      stop("uploadNewComputation: Improper definition")
+    stop("uploadNewComputation: Improper definition")
   }
   localhost <- (grepl("^http://localhost", site$url) || grepl("^http://127.0.0.1", site$url))
+  sType <- getConfig()$serialize_type
   payload <- if (localhost) {
     list(defn = defn, data = data, dataFileName = paste0(site$name, ".rds"))
   } else {
     list(defn = defn, data = data)
   }
-  q <- POST(.makeOpencpuURL(urlPrefix = site$url, fn = "saveNewComputation"),
-            body = toJSON(payload),
-            add_headers("Content-Type" = "application/json"),
-            config=getConfig()$sslConfig
-            )
+  q <- if (sType == "json") {
+    POST(.makeOpencpuURL(urlPrefix = site$url, fn = "saveNewComputation", 
+                         serialize_type = "json"),
+         body = toJSON(payload),
+         add_headers("Content-Type" = "application/json"),
+         config=getConfig()$sslConfig
+    )
+  } else {
+    POST(.makeOpencpuURL(urlPrefix = site$url, fn = "saveNewComputation",
+                         serialize_type = "pb"),
+         body = serialize_pb(payload, NULL),
+         add_headers("Content-Type" = "application/rprotobuf"),
+         config=getConfig()$sslConfig
+    )
+  }
   .deSerialize(q)
 }
 
@@ -711,8 +742,14 @@ writeCode <- function(defn, sites, outputFileName) {
   wd <- getComputationInfo("workingDir")
   f <- file(paste(wd, outputFileName, sep=.Platform$file.sep), open="w")
   writeLines("library(distcomp)", con=f)
-  writeLines(sprintf("defn <- jsonlite::fromJSON('%s')", toJSON(defn)), f)
-  writeLines(sprintf("sites <- jsonlite::fromJSON('%s', simplifyDataFrame = FALSE)", toJSON(sites)), f)
+  sType <- getConfig()$serialize_type
+  if (sType == "json") {
+    writeLines(sprintf("defn <- jsonlite::fromJSON('%s')", toJSON(defn)), f)
+    writeLines(sprintf("sites <- jsonlite::fromJSON('%s', simplifyDataFrame = FALSE)", toJSON(sites)), f)  
+  } else {
+    writeLines(sprintf("defn <- RProtoBuf::unserialize_pb('%s')", serialize_pb(defn, NULL)), f)
+    writeLines(sprintf("sites <- RProtoBuf::unserialize_pb('%s', simplifyDataFrame = FALSE)", serialize_pb(sites, NULL)), f)
+  }
   ##dump(c("defn", "sites"), f)
   writeLines("master <- makeMaster(defn)", f)
   writeLines("for (site in sites) {", f)
